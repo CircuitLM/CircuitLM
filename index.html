@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Interactive Circuit Diagram</title>
+<style>
+  body { font-family: sans-serif; margin: 10px; }
+  #circuitText { width: 100%; max-width: 600px; }
+  #diagram { border: 1px solid #ccc; }
+  .component rect { fill: #e0f7fa; stroke: #00838f; stroke-width: 2px; }
+  .component text.label { font-weight: bold; text-anchor: middle; dominant-baseline: middle; fill: #004d40; }
+  .pin-dot { fill: #00838f; }
+  .pin-label { font-size: 10px; fill: #005662; }
+  .wire { stroke: #555; stroke-width: 2px; fill: none; }
+  .wire-arc { stroke: #555; stroke-width: 2px; fill: none; }
+</style>
+</head>
+<body>
+
+<!-- Textarea for circuit description input and a button to render the diagram -->
+<textarea id="circuitText" rows="6" cols="60">
+# Example circuit
+COMPONENT R1 pins: A, B
+COMPONENT R2 pins: A, B
+COMPONENT C1 pins: B, C
+
+CONNECTIONS:
+R1.A - R2.A
+R1.B - C1.B
+R2.B - C1.C
+</textarea>
+<br>
+<button id="drawBtn">Draw Circuit</button>
+<br>
+
+<!-- SVG container for the circuit diagram -->
+<svg id="diagram" width="800" height="600"></svg>
+
+<!-- D3.js library (v6) for rendering and interaction -->
+<script src="https://d3js.org/d3.v6.min.js"></script>
+<script>
+(function() {
+  const svg = d3.select("#diagram");
+  const width = +svg.attr("width"), height = +svg.attr("height");
+
+  // Main group that holds all components and wires (for zoom/pan)
+  const mainGroup = svg.append("g");
+
+  // Enable zooming and panning on the SVG
+  svg.call(d3.zoom().scaleExtent([0.5, 2]).on("zoom", (event) => {
+    mainGroup.attr("transform", event.transform);
+  }));
+
+  // Variables to hold current components and connections (for global reference in functions)
+  let currentComponents = [], currentConnections = [];
+
+  // Parse the circuit description text into components and connections
+  function parseCircuit(text) {
+    const components = [];
+    const compMap = {};
+    const connections = [];
+    const compLines = [], connLines = [];
+
+    // Split input text by line and categorize lines
+    text.split(/\r?\n/).forEach(rawLine => {
+      const line = rawLine.trim();
+      if (!line || line.startsWith("#")) return;           // ignore empty lines and comments
+      if (line.toUpperCase().startsWith("COMPONENT")) {
+        compLines.push(line);
+      } else if (line.toUpperCase().startsWith("CONNECTION")) {
+        // skip "CONNECTIONS:" label line
+      } else if (line.includes("-")) {
+        connLines.push(line);
+      }
+    });
+
+    // Process component definition lines
+    compLines.forEach(line => {
+      // Remove the leading "COMPONENT" keyword
+      let rest = line.replace(/^COMPONENT\s+/i, "");
+      // Split into component name and pin list
+      const parts = rest.split(/\s*pins:\s*/i);
+      const name = parts[0].trim();
+      const pinsStr = parts[1] || "";
+      // Split pins by commas, semicolons or whitespace
+      const pinNames = pinsStr.split(/[;,]\s*|\s+/).map(p => p.trim()).filter(p => p);
+      const comp = { id: name, name: name, pins: pinNames };
+      compMap[name] = comp;
+      components.push(comp);
+    });
+
+    // Process connection lines (each may contain one or multiple "A - B" segments)
+    connLines.forEach(line => {
+      const segments = line.split(/[;,]/);
+      segments.forEach(seg => {
+        const pair = seg.trim();
+        if (!pair) return;
+        const [end1, end2] = pair.split("-").map(s => s.trim());
+        if (!end1 || !end2) return;
+        const [name1, pin1] = end1.split(".");
+        const [name2, pin2] = end2.split(".");
+        if (!name1 || !pin1 || !name2 || !pin2) return;
+        // Ensure both components exist in compMap (create if missing)
+        let comp1 = compMap[name1];
+        let comp2 = compMap[name2];
+        if (!comp1) {
+          comp1 = { id: name1, name: name1, pins: [] };
+          compMap[name1] = comp1;
+          components.push(comp1);
+        }
+        if (!comp2) {
+          comp2 = { id: name2, name: name2, pins: [] };
+          compMap[name2] = comp2;
+          components.push(comp2);
+        }
+        // Add pins to components if not already present
+        if (!comp1.pins.includes(pin1)) comp1.pins.push(pin1);
+        if (!comp2.pins.includes(pin2)) comp2.pins.push(pin2);
+        // Record the connection
+        connections.push({ source: comp1, sourcePin: pin1, target: comp2, targetPin: pin2 });
+      });
+    });
+
+    // Finalize components: create pin maps and compute size/pin positions
+    components.forEach(comp => {
+      // Remove duplicate pins and create a name->index map
+      comp.pins = Array.from(new Set(comp.pins));
+      comp.pinMap = {};
+      comp.pins.forEach((p, i) => { comp.pinMap[p] = i; });
+      // Determine number of pins on left vs right for placement
+      const totalPins = comp.pins.length;
+      const nLeft = Math.ceil(totalPins / 2);
+      const nRight = Math.floor(totalPins / 2);
+      // Set component base size (w fixed, h scales with pin count)
+      comp.width = 60;
+      comp.height = Math.max(nLeft, nRight) * 20 + 20;
+      // Compute relative positions for each pin (from component center)
+      comp.pinPositions = [];
+      const leftSpacing = nLeft > 0 ? comp.height / (nLeft + 1) : 0;
+      const rightSpacing = nRight > 0 ? comp.height / (nRight + 1) : 0;
+      let leftCount = 0, rightCount = 0;
+      comp.pins.forEach((pin, idx) => {
+        if (idx < nLeft) {
+          // Assign first half of pins to left side
+          leftCount++;
+          const y = -comp.height/2 + leftSpacing * leftCount;
+          comp.pinPositions[idx] = { x: -comp.width/2, y: y };
+        } else {
+          // Remaining pins to right side
+          rightCount++;
+          const y = -comp.height/2 + rightSpacing * rightCount;
+          comp.pinPositions[idx] = { x: comp.width/2, y: y };
+        }
+      });
+    });
+
+    return { components, connections };
+  }
+
+  // Automatic layout: assign layers (hierarchical) and apply force-directed adjustments
+  function autoLayout(components, connections) {
+    if (components.length === 0) return;
+    // Build adjacency list for components
+    const adj = {};
+    components.forEach(comp => { adj[comp.id] = new Set(); });
+    connections.forEach(conn => {
+      adj[conn.source.id].add(conn.target.id);
+      adj[conn.target.id].add(conn.source.id);
+    });
+    // BFS to assign layer indices
+    const layers = {}, visited = {};
+    const queue = [];
+    const root = components[0];
+    queue.push({ id: root.id, depth: 0 });
+    visited[root.id] = true;
+    layers[0] = [root];
+    root.layer = 0;
+    while (queue.length) {
+      const { id, depth } = queue.shift();
+      adj[id].forEach(nbrId => {
+        if (!visited[nbrId]) {
+          visited[nbrId] = true;
+          const comp = components.find(c => c.id === nbrId);
+          if (comp) {
+            comp.layer = depth + 1;
+            layers[depth + 1] = layers[depth + 1] || [];
+            layers[depth + 1].push(comp);
+            queue.push({ id: nbrId, depth: depth + 1 });
+          }
+        }
+      });
+    }
+    // If any components remain unvisited (disconnected subgraphs), give them subsequent layers
+    let maxLayer = Math.max(...Object.keys(layers).map(Number));
+    components.forEach(comp => {
+      if (!visited[comp.id]) {
+        maxLayer++;
+        comp.layer = maxLayer;
+        layers[maxLayer] = layers[maxLayer] || [];
+        layers[maxLayer].push(comp);
+        visited[comp.id] = true;
+      }
+    });
+    // Initial placement: spread layers horizontally and components in a layer vertically
+    const layerSpacing = 200;
+    Object.entries(layers).forEach(([depthStr, comps]) => {
+      const depth = +depthStr;
+      const x = depth * layerSpacing;
+      const layerSize = comps.length;
+      comps.forEach((comp, index) => {
+        comp.x = x;
+        // Center the layer around y=0, with 100px spacing
+        comp.y = (index - (layerSize - 1) / 2) * 100;
+      });
+    });
+    // Force-directed refinement: link force, repel force, collision avoidance
+    const simulation = d3.forceSimulation(components)
+      .force("link", d3.forceLink(connections).id(d => d.id).distance(80).strength(0.5))
+      .force("charge", d3.forceManyBody().strength(-300))
+      .force("collide", d3.forceCollide().radius(d => Math.max(d.width, d.height) / 2 + 20))
+      .force("x", d3.forceX(d => d.layer * layerSpacing).strength(0.5))
+      .force("y", d3.forceY(0).strength(0.1))
+      .stop();
+    // Run a few iterations of the simulation to adjust node positions
+    simulation.tick(50);
+    simulation.stop();
+  }
+
+  // Compute a polyline path for a given connection (avoiding components)
+  function computeWirePath(link) {
+    const src = link.source, tgt = link.target;
+    const sIdx = src.pinMap[link.sourcePin], tIdx = tgt.pinMap[link.targetPin];
+    const sp = src.pinPositions[sIdx], tp = tgt.pinPositions[tIdx];
+    const x1 = src.x + sp.x, y1 = src.y + sp.y;
+    const x2 = tgt.x + tp.x, y2 = tgt.y + tp.y;
+    let xmid;
+    // If source and target pins are on the same side (both left or both right), route the wire around that side
+    if (sp.x < 0 && tp.x < 0) {
+      xmid = Math.min(x1, x2) - 50;  // route to the left of both components
+    } else if (sp.x > 0 && tp.x > 0) {
+      xmid = Math.max(x1, x2) + 50;  // route to the right of both components
+    } else {
+      xmid = (x1 + x2) / 2;
+    }
+    // Adjust xmid to avoid crossing through any intermediate component
+    currentComponents.forEach(node => {
+      if (node === src || node === tgt) return;
+      const nodeLeft = node.x - node.width/2 - 5;
+      const nodeRight = node.x + node.width/2 + 5;
+      if (xmid > nodeLeft && xmid < nodeRight) {  // xmid falls within this node's width
+        const topY = Math.min(y1, y2), bottomY = Math.max(y1, y2);
+        // Check if the vertical segment at xmid would intersect this node vertically
+        if (node.y - node.height/2 < bottomY && node.y + node.height/2 > topY) {
+          // Shift xmid to just outside the node's boundary
+          if (x1 < x2) {
+            xmid = nodeRight + 20;
+          } else {
+            xmid = nodeLeft - 20;
+          }
+        }
+      }
+    });
+    // Construct polyline points: start, turn at source, turn at target, end
+    const points = [
+      `${x1},${y1}`,
+      `${xmid},${y1}`,
+      `${xmid},${y2}`,
+      `${x2},${y2}`
+    ];
+    return points.join(" ");
+  }
+
+  // Detect wire crossings and draw arc "jumpers" for overlapping lines
+  function updateWireArcs() {
+    // Remove existing arc markers
+    mainGroup.selectAll(".wire-arc").remove();
+    // Get all wire elements and break them into line segments
+    const wires = mainGroup.selectAll(".wire").nodes();
+    const segments = [];
+    wires.forEach((elem, wi) => {
+      const pts = elem.getAttribute("points").split(" ").map(pt => {
+        const [x, y] = pt.split(",").map(Number);
+        return { x, y };
+      });
+      for (let k = 0; k < pts.length - 1; k++) {
+        const pA = pts[k], pB = pts[k+1];
+        segments.push({
+          wireIndex: wi,
+          x1: pA.x, y1: pA.y,
+          x2: pB.x, y2: pB.y,
+          orientation: (pA.y === pB.y) ? "h" : "v"  // horizontal or vertical segment
+        });
+      }
+    });
+    // Check every pair of segments for perpendicular intersection
+    for (let i = 0; i < segments.length; i++) {
+      for (let j = i + 1; j < segments.length; j++) {
+        const seg1 = segments[i], seg2 = segments[j];
+        if (seg1.wireIndex === seg2.wireIndex) continue;               // skip segments from the same wire
+        if (seg1.orientation === seg2.orientation) continue;           // only consider intersecting horizontal vs vertical
+        // Identify which is horizontal and which is vertical
+        let horiz = seg1, vert = seg2;
+        if (seg1.orientation === "v" && seg2.orientation === "h") {
+          horiz = seg2;
+          vert = seg1;
+        }
+        // Determine the potential crossing point
+        const minX = Math.min(horiz.x1, horiz.x2), maxX = Math.max(horiz.x1, horiz.x2);
+        const minY = Math.min(vert.y1, vert.y2), maxY = Math.max(vert.y1, vert.y2);
+        const crossX = vert.x1, crossY = horiz.y1;
+        // Check if the horizontal segment spans crossX and the vertical spans crossY
+        if (crossX > minX && crossX < maxX && crossY > minY && crossY < maxY) {
+          // Draw a small semicircle arc on the horizontal wire at the crossing point
+          const r = 6;  // arc radius
+          mainGroup.append("path")
+            .attr("class", "wire-arc")
+            .attr("d", `M ${crossX - r},${crossY} A ${r},${r} 0 0 0 ${crossX + r},${crossY}`);
+        }
+      }
+    }
+  }
+
+  // Draw the circuit: components and wires (and apply drag behavior)
+  function drawCircuit(components, connections) {
+    // Update global references
+    currentComponents = components;
+    currentConnections = connections;
+    // Clear any existing drawing
+    mainGroup.selectAll("*").remove();
+
+    // Draw component nodes
+    const node = mainGroup.selectAll(".component")
+      .data(components, d => d.id)
+      .enter().append("g")
+      .attr("class", "component")
+      .attr("transform", d => `translate(${d.x},${d.y})`)
+      .call(d3.drag()
+        .on("start", function(event, d) {
+          event.sourceEvent.stopPropagation();  // prevent zoom pan on drag start
+        })
+        .on("drag", function(event, d) {
+          // Update component position
+          d.x = event.x;
+          d.y = event.y;
+          d3.select(this).attr("transform", `translate(${d.x},${d.y})`);
+          // Recompute and update all wire paths
+          mainGroup.selectAll(".wire").attr("points", link => computeWirePath(link));
+          // Update crossing arcs
+          updateWireArcs();
+        })
+        .on("end", function(event, d) {
+          // (Optional) Snap to grid or other post-drag adjustments can be done here
+        })
+      );
+
+    // Component rectangle (body)
+    node.append("rect")
+      .attr("x", d => -d.width/2)
+      .attr("y", d => -d.height/2)
+      .attr("width", d => d.width)
+      .attr("height", d => d.height)
+      .attr("rx", 10).attr("ry", 10);
+
+    // Component label (centered)
+    node.append("text")
+      .attr("class", "label")
+      .attr("x", 0).attr("y", 0)
+      .text(d => d.name);
+
+    // Draw pin markers and labels for each component
+    node.each(function(d) {
+      const compGroup = d3.select(this);
+      d.pins.forEach((pin, idx) => {
+        const pos = d.pinPositions[idx];
+        // Small circle at pin position
+        compGroup.append("circle")
+          .attr("class", "pin-dot")
+          .attr("cx", pos.x)
+          .attr("cy", pos.y)
+          .attr("r", 3);
+        // Pin label (text) placed just outside the component rectangle
+        compGroup.append("text")
+          .attr("class", "pin-label")
+          .attr("x", pos.x < 0 ? pos.x - 5 : pos.x + 5)
+          .attr("y", pos.y)
+          .attr("text-anchor", pos.x < 0 ? "end" : "start")
+          .attr("dominant-baseline", "middle")
+          .text(pin);
+      });
+    });
+
+    // Draw wires (connections) as polylines
+    mainGroup.selectAll(".wire")
+      .data(connections)
+      .enter().append("polyline")
+      .attr("class", "wire")
+      .attr("points", d => computeWirePath(d));
+
+    // Add arc markers for any wire crossings
+    updateWireArcs();
+  }
+
+  // Button handler to parse the text and redraw the circuit
+  document.getElementById("drawBtn").addEventListener("click", () => {
+    const text = document.getElementById("circuitText").value;
+    const data = parseCircuit(text);
+    autoLayout(data.components, data.connections);
+    drawCircuit(data.components, data.connections);
+  });
+
+  // Initial rendering of the example circuit on page load
+  const initialData = parseCircuit(document.getElementById("circuitText").value);
+  autoLayout(initialData.components, initialData.connections);
+  drawCircuit(initialData.components, initialData.connections);
+})();
+</script>
+</body>
+</html>

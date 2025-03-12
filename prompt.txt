@@ -1,0 +1,15 @@
+我定义了一套电路原理图的描述格式，参考下面的例子，你现在用这套格式帮我做一个高电平驱动光耦开关继电器的电路。注意如果电源或者接地需要接到多个元件上，对于每个连接复制一个新的电源或地COMPONENT
+
+COMPONENT 电源33 pins: 输出
+COMPONENT 电源5 pins: 输出
+COMPONENT 地 pins: 公共
+
+COMPONENT 继电器A pins: 线圈正, 线圈负, 常开
+COMPONENT 光耦C pins: LED正, LED负, 发射, 集电
+COMPONENT 三极管B pins: 集电极, 基极, 发射极
+COMPONENT 电阻220 pins: A, B
+
+CONNECTIONS:
+电源33.输出 - 电阻220.A
+电阻220.B - 光耦C.LED正
+光耦C.LED负 - 地.公共
